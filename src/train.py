@@ -1,6 +1,7 @@
 import os
 import joblib
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -50,8 +51,8 @@ def main():
     y_test = test_df[label_col].astype(int)
     X_test = test_df.drop(columns=[label_col])
 
-    cat_cols = [c for c in X_train.columns if X_train[c].dtype == "object"]
-    num_cols = [c for c in X_train.columns if c not in cat_cols]
+    cat_cols = [c for c in X_train.columns if not is_numeric_dtype(X_train[c])]
+    num_cols = [c for c in X_train.columns if is_numeric_dtype(X_train[c])]
 
     preprocessor = ColumnTransformer(
         transformers=[

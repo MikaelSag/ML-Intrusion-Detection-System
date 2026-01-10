@@ -10,7 +10,14 @@ COLS_PATH = "artifacts/feature_columns.joblib"
 
 app = FastAPI(title="ML IDS (UNSW-NB15)")
 
-# Load artifacts at startup
+THRESH_PATH = "artifacts/threshold.joblib"
+
+try:
+    thr_info = joblib.load(THRESH_PATH)
+    THRESHOLD = float(thr_info["threshold"])
+except Exception:
+    THRESHOLD = 0.5
+
 try:
     model = joblib.load(MODEL_PATH)
     expected_cols = joblib.load(COLS_PATH)
@@ -38,7 +45,7 @@ def predict(flow: FlowFeatures):
     X = pd.DataFrame([row], columns=expected_cols)
 
     probs = model.predict_proba(X)[0]
-    pred_label = int(probs[1] >= 0.5)
+    pred_label = int(probs[1] >= THRESHOLD)
     prediction = "attack" if pred_label == 1 else "benign"
     confidence = float(max(probs))
 
