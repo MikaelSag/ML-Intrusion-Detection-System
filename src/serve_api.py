@@ -1,9 +1,10 @@
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile
 
-from src.schemas import FlowFeatures, PredictionResponse
+from src.schemas import FlowFeatures, PredictionResponse, BatchPredictionResponse, BatchAlert, BatchSummary
 from src.rules import tag_flow
+from src.severity import classify_severity
 
 MODEL_PATH = "artifacts/model.joblib"
 COLS_PATH = "artifacts/feature_columns.joblib"
@@ -27,6 +28,14 @@ except Exception as e:
     load_error = str(e)
 
 
+def load_uploaded_file(file: UploadFile) -> pd.DataFrame:
+    if file.filename.endswith(".csv"):
+        return pd.read_csv(file.file)
+    elif file.filename.endswith(".parquet"):
+        return pd.read_parquet(file.file)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
 @app.get("/health")
 def health():
     if model is None or expected_cols is None:
@@ -45,9 +54,10 @@ def predict(flow: FlowFeatures):
     X = pd.DataFrame([row], columns=expected_cols)
 
     probs = model.predict_proba(X)[0]
-    pred_label = int(probs[1] >= THRESHOLD)
-    prediction = "attack" if pred_label == 1 else "benign"
-    confidence = float(max(probs))
+    attack_prob = float(probs[1])  # P(attack)
+    severity = classify_severity(attack_prob, THRESHOLD)
+    prediction = "attack" if severity != "benign" else "benign"
+    confidence = attack_prob
 
     important_features = []
     try:
@@ -69,3 +79,81 @@ def predict(flow: FlowFeatures):
         "rule_tags": tags,
         "important_features": important_features,
     }
+
+
+@app.post("/batch_predict", response_model=BatchPredictionResponse)
+def batch_predict(file: UploadFile = File(...)):
+    df = load_uploaded_file(file)
+
+    # Drop label if present
+    if "label" in df.columns:
+        df = df.drop(columns=["label"])
+
+    MAX_ROWS = 1000
+    if len(df) > MAX_ROWS:
+        df = df.head(MAX_ROWS)
+
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = 0
+    df = df[expected_cols]
+
+    probs = model.predict_proba(df)
+    attack_probs = probs[:, 1]
+
+    summary_counts = {
+        "benign": 0,
+        "low": 0,
+        "medium": 0,
+        "high": 0
+    }
+
+    alerts = []
+
+    for idx, prob in enumerate(attack_probs):
+        severity = classify_severity(prob, THRESHOLD)
+        summary_counts[severity] += 1
+
+        if severity == "benign":
+            continue
+
+        row = df.iloc[idx].to_dict()
+        rule_tags = tag_flow(row)
+
+        try:
+            preprocess = model.named_steps["preprocess"]
+            clf = model.named_steps["clf"]
+            feature_names = preprocess.get_feature_names_out()
+            coefs = clf.coef_[0]
+            top_idx = (abs(coefs)).argsort()[-8:][::-1]
+            important_features = [str(feature_names[i]) for i in top_idx]
+        except Exception:
+            important_features = list(row.keys())[:8]
+
+        alerts.append(
+            BatchAlert(
+                index=idx,
+                severity=severity,
+                confidence=float(prob),
+                rule_tags=rule_tags,
+                key_features={
+                    "proto": row.get("proto"),
+                    "rate": row.get("rate"),
+                    "sbytes": row.get("sbytes"),
+                    "dbytes": row.get("dbytes")
+                },
+                important_features=important_features
+            )
+        )
+
+    alerts = alerts[:100]
+
+    summary = BatchSummary(
+        total_flows=len(df),
+        **summary_counts
+    )
+
+    return BatchPredictionResponse(
+        summary=summary,
+        alerts=alerts
+    )
