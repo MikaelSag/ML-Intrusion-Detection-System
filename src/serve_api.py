@@ -9,9 +9,19 @@ from src.severity import classify_severity
 MODEL_PATH = "artifacts/model.joblib"
 COLS_PATH = "artifacts/feature_columns.joblib"
 
-app = FastAPI(title="ML IDS (UNSW-NB15)")
+app = FastAPI(
+    title="ML IDS (UNSW-NB15)",
+    description=(
+        "Machine-learning based Intrusion Detection System for network flow logs. "
+        "Supports single-flow prediction and batch analysis with severity levels, "
+        "rule-based tagging, and analyst-focused summaries."
+    ),
+    version="1.0.0"
+)
 
 THRESH_PATH = "artifacts/threshold.joblib"
+
+MAX_FILE_SIZE_MB = 10
 
 try:
     thr_info = joblib.load(THRESH_PATH)
@@ -29,6 +39,16 @@ except Exception as e:
 
 
 def load_uploaded_file(file: UploadFile) -> pd.DataFrame:
+    file.file.seek(0, 2)
+    size_mb = file.file.tell() / (1024 * 1024)
+    file.file.seek(0)
+
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({size_mb:.2f}MB). Max allowed is {MAX_FILE_SIZE_MB}MB."
+        )
+
     if file.filename.endswith(".csv"):
         return pd.read_csv(file.file)
     elif file.filename.endswith(".parquet"):
@@ -53,7 +73,14 @@ def predict(flow: FlowFeatures):
     row = {col: data.get(col, None) for col in expected_cols}
     X = pd.DataFrame([row], columns=expected_cols)
 
-    probs = model.predict_proba(X)[0]
+    try:
+        probs = model.predict_proba(X)[0]
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model inference failed: {str(e)}"
+        )
+
     attack_prob = float(probs[1])  # P(attack)
     severity = classify_severity(attack_prob, THRESHOLD)
     prediction = "attack" if severity != "benign" else "benign"
@@ -83,6 +110,12 @@ def predict(flow: FlowFeatures):
 
 @app.post("/batch_predict", response_model=BatchPredictionResponse)
 def batch_predict(file: UploadFile = File(...)):
+    if model is None or expected_cols is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model not loaded: {load_error}"
+        )
+
     df = load_uploaded_file(file)
 
     # Drop label if present
@@ -91,14 +124,24 @@ def batch_predict(file: UploadFile = File(...)):
 
     MAX_ROWS = 1000
     if len(df) > MAX_ROWS:
-        df = df.head(MAX_ROWS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many rows ({len(df)}). Max allowed is {MAX_ROWS}."
+        )
 
     for col in expected_cols:
         if col not in df.columns:
-            df[col] = 0
+            df[col] = None
     df = df[expected_cols]
 
-    probs = model.predict_proba(df)
+    try:
+        probs = model.predict_proba(df)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model inference failed: {str(e)}"
+        )
+
     attack_probs = probs[:, 1]
 
     summary_counts = {
