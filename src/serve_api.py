@@ -1,4 +1,5 @@
 import joblib
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, File, UploadFile
 
@@ -37,6 +38,18 @@ except Exception as e:
     expected_cols = None
     load_error = str(e)
 
+CATEGORICAL_COLS = ["proto", "service", "state"]
+VALID_CATEGORIES = {}
+
+try:
+    preprocess = model.named_steps["preprocess"]
+    for name, transformer, cols in preprocess.transformers_:
+        if name == "cat":
+            encoder = transformer.named_steps["onehot"]
+            for col, cats in zip(cols, encoder.categories_):
+                VALID_CATEGORIES[col] = set(cats)
+except Exception:
+    VALID_CATEGORIES = {}
 
 def load_uploaded_file(file: UploadFile) -> pd.DataFrame:
     file.file.seek(0, 2)
@@ -70,8 +83,16 @@ def predict(flow: FlowFeatures):
 
     data = flow.features
 
+    for col in ["proto", "service", "state"]:
+        if col in data and col in VALID_CATEGORIES:
+            if data[col] not in VALID_CATEGORIES[col]:
+                data[col] = "unknown"
+
     row = {col: data.get(col, None) for col in expected_cols}
     X = pd.DataFrame([row], columns=expected_cols)
+
+    if X.isna().any().any():
+        X = X.fillna(0)
 
     try:
         probs = model.predict_proba(X)[0]
@@ -102,6 +123,7 @@ def predict(flow: FlowFeatures):
 
     return {
         "prediction": prediction,
+        "severity": severity,
         "confidence": confidence,
         "rule_tags": tags,
         "important_features": important_features,
