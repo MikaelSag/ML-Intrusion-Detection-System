@@ -4,20 +4,18 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, File, UploadFile
 
 from src.schemas import FlowFeatures, PredictionResponse, BatchPredictionResponse, BatchAlert, BatchSummary
-from src.rules import tag_flow
+from src.rules import tag_flow, infer_attack_label
 from src.severity import classify_severity
 
 MODEL_PATH = "artifacts/model.joblib"
 COLS_PATH = "artifacts/feature_columns.joblib"
 
 app = FastAPI(
-    title="ML IDS (UNSW-NB15)",
-    description=(
-        "Machine-learning based Intrusion Detection System for network flow logs. "
-        "Supports single-flow prediction and batch analysis with severity levels, "
-        "rule-based tagging, and analyst-focused summaries."
-    ),
-    version="1.0.0"
+    title="ML IDS",
+    description="Machine Learning Intrusion Detection System",
+    version="1.0.0",
+    docs_url="/",
+    redoc_url=None
 )
 
 THRESH_PATH = "artifacts/threshold.joblib"
@@ -51,6 +49,7 @@ try:
 except Exception:
     VALID_CATEGORIES = {}
 
+
 def load_uploaded_file(file: UploadFile) -> pd.DataFrame:
     file.file.seek(0, 2)
     size_mb = file.file.tell() / (1024 * 1024)
@@ -69,14 +68,36 @@ def load_uploaded_file(file: UploadFile) -> pd.DataFrame:
     else:
         raise HTTPException(status_code=400, detail="Unsupported file type")
 
-@app.get("/health")
+
+@app.get(
+    "/health",
+    summary="System health check",
+    tags=["System"],
+    description=(
+        "Verifies that the API service is running and responsive. "
+        "This endpoint does not perform model inference or data validation "
+        "and is intended for uptime monitoring, readiness checks, and "
+        "load balancer probes."
+    ),
+)
 def health():
     if model is None or expected_cols is None:
         return {"status": "error", "detail": f"Model not loaded: {load_error}"}
     return {"status": "ok"}
 
 
-@app.post("/predict", response_model=PredictionResponse)
+@app.post(
+    "/predict",
+    summary="Analyze a single network flow",
+    tags=["Predict"],
+    description=(
+        "Performs intrusion detection on a single network flow using the "
+        "trained machine learning model. The request must include all "
+        "required flow features. The response returns the predicted attack "
+        "label, severity level, confidence score, and key contributing "
+        "features used in the decision."
+    ),
+)
 def predict(flow: FlowFeatures):
     if model is None or expected_cols is None:
         raise HTTPException(status_code=500, detail=f"Model not loaded: {load_error}")
@@ -102,10 +123,10 @@ def predict(flow: FlowFeatures):
             detail=f"Model inference failed: {str(e)}"
         )
 
-    attack_prob = float(probs[1])  # P(attack)
+    attack_prob = float(probs[1])
     severity = classify_severity(attack_prob, THRESHOLD)
     prediction = "attack" if severity != "benign" else "benign"
-    confidence = attack_prob
+    confidence = round(attack_prob, 4)
 
     important_features = []
     try:
@@ -120,17 +141,25 @@ def predict(flow: FlowFeatures):
         important_features = list(data.keys())[:8]
 
     tags = tag_flow(data)
+    attack_label = infer_attack_label(tags)
 
     return {
         "prediction": prediction,
         "severity": severity,
         "confidence": confidence,
+        "attack_label": attack_label,
         "rule_tags": tags,
         "important_features": important_features,
     }
 
 
-@app.post("/batch_predict", response_model=BatchPredictionResponse)
+@app.post(
+    "/batch_predict",
+    response_model=BatchPredictionResponse,
+    tags=["Predict"],
+    summary="Analyze a batch of network flows",
+    description="Upload a CSV or Parquet file containing network flow records"
+)
 def batch_predict(file: UploadFile = File(...)):
     if model is None or expected_cols is None:
         raise HTTPException(
@@ -140,7 +169,6 @@ def batch_predict(file: UploadFile = File(...)):
 
     df = load_uploaded_file(file)
 
-    # Drop label if present
     if "label" in df.columns:
         df = df.drop(columns=["label"])
 
@@ -154,7 +182,14 @@ def batch_predict(file: UploadFile = File(...)):
     for col in expected_cols:
         if col not in df.columns:
             df[col] = None
+
     df = df[expected_cols]
+
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(0)
+        else:
+            df[col] = df[col].astype(str).fillna("unknown")
 
     try:
         probs = model.predict_proba(df)
@@ -199,7 +234,8 @@ def batch_predict(file: UploadFile = File(...)):
             BatchAlert(
                 index=idx,
                 severity=severity,
-                confidence=float(prob),
+                confidence=round(float(prob), 4),
+                attack_label=infer_attack_label(rule_tags),
                 rule_tags=rule_tags,
                 key_features={
                     "proto": row.get("proto"),

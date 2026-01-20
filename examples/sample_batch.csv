@@ -1,5 +1,0 @@
-dur,proto,service,state,spkts,dpkts,sbytes,dbytes,rate,sload,dload,sloss,dloss,ct_src_dport_ltm,ct_dst_sport_ltm
-2.1,tcp,http,FIN,10,8,3000,12000,900,12000,38000,0,0,1,1
-0.04,udp,-,INT,55,0,14000,0,78000,280000000,0,0,0,18,18
-0.08,udp,-,INT,48,0,13000,0,62000,260000000,0,0,0,15,15
-3.0,tcp,ftp,FIN,14,12,5000,22000,1500,18000,42000,0,0,1,1
